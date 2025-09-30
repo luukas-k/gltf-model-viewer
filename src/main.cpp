@@ -40,12 +40,15 @@ struct material {
 	glm::vec4 base_color;
 	int base_color_index, base_color_layer;
 	int pad0, pad1;
+	int normal_index, normal_layer;
+	int pad2, pad3;
 };
 
 struct vertex {
 	glm::vec3 position;
 	glm::vec3 normal;
 	glm::vec2 uv;
+	glm::vec4 tangent;
 };
 
 struct submesh {
@@ -72,6 +75,9 @@ struct draw_elements_indirect_command {
 
 int main(int argc, const char *argv[]) {
 	glfwInit();
+
+	glfwWindowHint(GLFW_SAMPLES, 16);
+
 	GLFWwindow *handle = glfwCreateWindow(1280, 720, "Title", nullptr, nullptr);
 	glfwMakeContextCurrent(handle);
 	gladLoadGL((GLADloadfunc)glfwGetProcAddress);
@@ -149,7 +155,7 @@ int main(int argc, const char *argv[]) {
 			glm::vec4{pbr["baseColorFactor"][0], pbr["baseColorFactor"][1], pbr["baseColorFactor"][2], pbr["baseColorFactor"][3]} :
 			glm::vec4{0, 0, 0, 1};
 
-		int32_t base_color_index, base_color_layer;
+		int32_t base_color_index{-1}, base_color_layer{-1};
 		if (pbr.contains("baseColorTexture")) {
 			auto &tex_def = gltf["textures"][(int)pbr["baseColorTexture"]["index"]];
 			std::pair<size_t, uint32_t> base_color_texture = image_to_array_tex[tex_def["source"]];
@@ -157,10 +163,20 @@ int main(int argc, const char *argv[]) {
 			base_color_layer = (int32_t)base_color_texture.second;
 		}
 
+		int32_t normal_index{-1}, normal_layer{-1};
+		if (mat_def.contains("normalTexture")) {
+			auto &tex_def = gltf["textures"][(int)mat_def["normalTexture"]["index"]];
+			std::pair<size_t, uint32_t> normal_texture = image_to_array_tex[tex_def["source"]];
+			normal_index = (int32_t)normal_texture.first;
+			normal_layer = (int32_t)normal_texture.second;
+		}
+
 		materials.push_back(material{
 			.base_color = base_color,
-			.base_color_index = base_color_index,
+			.base_color_index = base_color_index, 
 			.base_color_layer = base_color_layer,
+			.normal_index = normal_index, 
+			.normal_layer = normal_layer,
 							});
 	}
 
@@ -229,6 +245,19 @@ int main(int argc, const char *argv[]) {
 				v.normal = *(glm::vec3*)norm_buffer_data.subspan(i * sizeof(glm::vec3), sizeof(glm::vec3)).data();
 				v.uv = *(glm::vec2*)tex_coord_buffer_data.subspan(i * sizeof(glm::vec2), sizeof(glm::vec2)).data();
 
+				if (prim_def["attributes"].contains("TANGENT")) {
+					auto &tangent_accessor = gltf["accessors"][(int)prim_def["attributes"]["TANGENT"]];
+					auto &tangent_buffer_view = gltf["bufferViews"][(int)tangent_accessor["bufferView"]];
+					auto &tangent_buffer = buffers[(int)tangent_buffer_view["buffer"]];
+
+					std::span<char> tangent_buffer_data =
+						std::span(tangent_buffer)
+						.subspan(tangent_buffer_view["byteOffset"], tangent_buffer_view["byteLength"])
+						.subspan(tangent_accessor["byteOffset"]);
+
+					v.tangent = *(glm::vec4*)tangent_buffer_data.subspan(i * sizeof(glm::vec4), sizeof(glm::vec4)).data();
+				}
+
 				vertices.push_back(v);
 			}
 
@@ -284,6 +313,9 @@ int main(int argc, const char *argv[]) {
 		glEnableVertexAttribArray(2);
 		glVertexAttribPointer(2, 2, GL_FLOAT, false, sizeof(vertex), (const void *)(intptr_t)offsetof(vertex, uv));
 
+		glEnableVertexAttribArray(3);
+		glVertexAttribPointer(3, 4, GL_FLOAT, false, sizeof(vertex), (const void *)(intptr_t)offsetof(vertex, tangent));
+
 		glGenBuffers(1, &ibo);
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
 		glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh_indices.size() * sizeof(uint32_t), mesh_indices.data(), GL_STATIC_DRAW);
@@ -333,6 +365,7 @@ int main(int argc, const char *argv[]) {
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aUV;
+layout(location = 3) in vec4 aTangent;
 
 uniform mat4 sys_proj = mat4(1);
 uniform mat4 sys_view = mat4(1);
@@ -342,6 +375,7 @@ out vec3 fPos;
 out vec3 fNormal;
 out vec2 fUV;
 out flat int fMaterial;
+out mat3 fTBN;
 
 void main(){
 	gl_Position = sys_proj * sys_view * sys_model * vec4(aPos, 1);
@@ -349,6 +383,11 @@ void main(){
 	fNormal = mat3(transpose(inverse(sys_model))) * aNormal;
 	fUV = aUV;
 	fMaterial = gl_DrawID;
+	
+	vec3 T = normalize(vec3(sys_model * vec4(aTangent.xyz,   0.0)));
+	vec3 B = normalize(vec3(sys_model * vec4(cross(aTangent.xyz, aNormal) * aTangent.w, 0.0)));
+	vec3 N = normalize(vec3(sys_model * vec4(aNormal,    0.0)));
+	fTBN = mat3(T, B, N);
 }
 
 )GLSL";
@@ -358,12 +397,14 @@ in vec3 fPos;
 in vec3 fNormal;
 in vec2 fUV;
 in flat int fMaterial;
+in mat3 fTBN;
 
 uniform sampler2DArray sys_textures[16];
 
 struct material {
 	vec4 base_color;
 	ivec4 base_color_texture;
+	ivec4 normal_texture;
 };
 
 layout(std430, binding = 0) buffer materials_buffer {
@@ -372,18 +413,33 @@ layout(std430, binding = 0) buffer materials_buffer {
 
 out vec4 rColor;
 
-vec4 get_base_color(ivec4 tex, vec2 uv) {
-	if (tex.x == 0) {
-		return texture(sys_textures[0], vec3(uv, tex.y));
+vec4 get_base_color(material mat, vec2 uv) {
+	if (mat.base_color_texture.x == 0) {
+		return texture(sys_textures[0], vec3(uv, mat.base_color_texture.y));
 	}
-	else if (tex.x == 1) {
-		return texture(sys_textures[1], vec3(uv, tex.y));
+	else if (mat.base_color_texture.x == 1) {
+		return texture(sys_textures[1], vec3(uv, mat.base_color_texture.y));
 	}
-	else if (tex.x == 2) {
-		return texture(sys_textures[2], vec3(uv, tex.y));
+	else if (mat.base_color_texture.x == 2) {
+		return texture(sys_textures[2], vec3(uv, mat.base_color_texture.y));
 	}
 	else {
-		return vec4(1, 0, 0, 1);
+		return mat.base_color;
+	}
+}
+
+vec3 get_normal(material mat, vec2 uv) {
+	if (mat.normal_texture.x == 0) {
+		return fTBN * (texture(sys_textures[0], vec3(uv, mat.normal_texture.y)).xyz * 2 - vec3(1));
+	}
+	else if (mat.normal_texture.x == 1) {
+		return fTBN * (texture(sys_textures[1], vec3(uv, mat.normal_texture.y)).xyz * 2 - vec3(1));
+	}
+	else if (mat.normal_texture.x == 2) {
+		return fTBN * (texture(sys_textures[2], vec3(uv, mat.normal_texture.y)).xyz * 2 - vec3(1));
+	}
+	else {
+		return fNormal;
 	}
 }
 
@@ -394,20 +450,26 @@ void main(){
 	vec3 light_pos = vec3(0, 5, 0);
 	vec3 light_dir = normalize(light_pos - fPos);
 
-	vec4 base_color = get_base_color(mat.base_color_texture, fUV);
+	vec4 base_color = get_base_color(mat, fUV);
 
 	// Ambient
 	float ambient_strength = 0.1;
 	vec3 ambient = light_color * ambient_strength;
 
 	// Diffuse
-	vec3 norm = normalize(fNormal);
+	// vec3 norm = normalize(fNormal);
+	vec3 norm = normalize(get_normal(mat, fUV));
 	float diffuse_strength = max(dot(norm, light_dir), 0.0);
 	vec3 diffuse = light_color * diffuse_strength;
+
+	if (base_color.a < 0.5) {
+		discard;
+	}
 
 	rColor = vec4((ambient + diffuse) * base_color.rgb, base_color.a);
 	// rColor = base_color;
 	// rColor = vec4(vec3(dot(fNormal, light_dir)), 1);
+	// rColor = vec4(norm, 1);
 }
 
 )GLSL";
@@ -532,22 +594,38 @@ void main(){
 
 				auto &mat = materials.at(sm.material);
 
-				auto &at = array_textures.at(mat.base_color_index);
-				
-				int32_t index = 0;
-				auto loc = std::find(bind_textures.begin(), bind_textures.end(), at);
-				if (loc == bind_textures.end()) {
-					index = bind_textures.size();
-					bind_textures.push_back(at);
+				int32_t base_index = -1;
+				if (mat.base_color_index != -1) {
+					auto &base_at = array_textures.at(mat.base_color_index);
+					auto loc = std::find(bind_textures.begin(), bind_textures.end(), base_at);
+					if (loc == bind_textures.end()) {
+						base_index = bind_textures.size();
+						bind_textures.push_back(base_at);
+					}
+					else {
+						base_index = (uint32_t)std::distance(bind_textures.begin(), loc);
+					}
 				}
-				else {
-					index = (uint32_t)std::distance(bind_textures.begin(), loc);
+
+				int32_t norm_index = -1;
+				if (mat.normal_index != -1) {
+					auto &norm_at = array_textures.at(mat.normal_index);
+					auto norm_loc = std::find(bind_textures.begin(), bind_textures.end(), norm_at);
+					if (norm_loc == bind_textures.end()) {
+						norm_index = bind_textures.size();
+						bind_textures.push_back(norm_at);
+					}
+					else {
+						norm_index = (uint32_t)std::distance(bind_textures.begin(), norm_loc);
+					}
 				}
 
 				mats.push_back(material{
 					.base_color = mat.base_color,
-					.base_color_index = index,
+					.base_color_index = base_index,
 					.base_color_layer = mat.base_color_layer,
+					.normal_index = norm_index,
+					.normal_layer = mat.normal_layer
 							   });
 			}
 
