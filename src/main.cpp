@@ -505,6 +505,9 @@ void main(){
 	glm::vec3 camera_pos{ 0.f, 0.f, 0.f };
 	glm::vec3 camera_rot{ 0.f, 0.f, 0.f };
 
+	glm::dvec2 cursor_pos{};
+	glfwGetCursorPos(handle, &cursor_pos.x, &cursor_pos.y);
+
 	double last_update = glfwGetTime();
 	while (!glfwWindowShouldClose(handle)) {
 		double current_update = glfwGetTime();
@@ -514,6 +517,18 @@ void main(){
 		glfwPollEvents();
 
 		// Updating
+		glm::dvec2 cur_cursor_pos{};
+		glfwGetCursorPos(handle, &cur_cursor_pos.x, &cur_cursor_pos.y);
+		glm::dvec2 cursor_delta = (glfwGetInputMode(handle, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) ? cursor_pos - cur_cursor_pos : glm::dvec2{0, 0};
+		cursor_pos = cur_cursor_pos;
+
+		if (glfwGetMouseButton(handle, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+			glfwSetInputMode(handle, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+		}
+		if (glfwGetKey(handle, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+			glfwSetInputMode(handle, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+		}
+
 		glm::vec3 mv_input{
 			(glfwGetKey(handle, GLFW_KEY_A) == GLFW_PRESS) ? -1.f : 0.f + 
 			(glfwGetKey(handle, GLFW_KEY_D) == GLFW_PRESS) ?  1.f : 0.f,
@@ -529,8 +544,8 @@ void main(){
 		};
 		camera_pos += 5.f * mv_dir * dt;
 
-		float dy = (glfwGetKey(handle, GLFW_KEY_UP) ? 1.f : 0.f) + (glfwGetKey(handle, GLFW_KEY_DOWN) ? -1.f : 0.f);
-		float dx = (glfwGetKey(handle, GLFW_KEY_RIGHT) ? -1.f : 0.f) + (glfwGetKey(handle, GLFW_KEY_LEFT) ? 1.f : 0.f);
+		float dy = ((glfwGetKey(handle, GLFW_KEY_UP) ? 1.f : 0.f) + (glfwGetKey(handle, GLFW_KEY_DOWN) ? -1.f : 0.f)) * dt + cursor_delta.y;
+		float dx = ((glfwGetKey(handle, GLFW_KEY_RIGHT) ? -1.f : 0.f) + (glfwGetKey(handle, GLFW_KEY_LEFT) ? 1.f : 0.f)) * dt + cursor_delta.x;
 		float sens = 0.01f;
 		camera_rot.x = glm::clamp(camera_rot.x + sens * dy, -3.1415f / 2.f, 3.1415f / 2.f);
 		camera_rot.y = glm::mod(camera_rot.y + sens * dx, 2.f * 3.1415f);
