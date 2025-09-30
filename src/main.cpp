@@ -44,6 +44,7 @@ struct material {
 
 struct vertex {
 	glm::vec3 position;
+	glm::vec3 normal;
 	glm::vec2 uv;
 };
 
@@ -201,6 +202,15 @@ int main(int argc, const char *argv[]) {
 				.subspan(pos_buffer_view["byteOffset"], pos_buffer_view["byteLength"])
 				.subspan(pos_accessor["byteOffset"]);
 
+			auto &norm_accessor = gltf["accessors"][(int)prim_def["attributes"]["NORMAL"]];
+			auto &norm_buffer_view = gltf["bufferViews"][(int)norm_accessor["bufferView"]];
+			auto &norm_buffer = buffers[(int)norm_buffer_view["buffer"]];
+
+			std::span<char> norm_buffer_data =
+				std::span(norm_buffer)
+				.subspan(norm_buffer_view["byteOffset"], norm_buffer_view["byteLength"])
+				.subspan(norm_accessor["byteOffset"]);
+
 			auto &tex_coord_accessor = gltf["accessors"][(int)prim_def["attributes"]["TEXCOORD_0"]];
 			auto &tex_coord_buffer_view = gltf["bufferViews"][(int)tex_coord_accessor["bufferView"]];
 			auto &tex_coord_buffer = buffers[(int)tex_coord_buffer_view["buffer"]];
@@ -216,6 +226,7 @@ int main(int argc, const char *argv[]) {
 				vertex v{};
 
 				v.position = *(glm::vec3*)pos_buffer_data.subspan(i * sizeof(glm::vec3), sizeof(glm::vec3)).data();
+				v.normal = *(glm::vec3*)norm_buffer_data.subspan(i * sizeof(glm::vec3), sizeof(glm::vec3)).data();
 				v.uv = *(glm::vec2*)tex_coord_buffer_data.subspan(i * sizeof(glm::vec2), sizeof(glm::vec2)).data();
 
 				vertices.push_back(v);
@@ -268,7 +279,10 @@ int main(int argc, const char *argv[]) {
 		glVertexAttribPointer(0, 3, GL_FLOAT, false, sizeof(vertex), (const void *)(intptr_t)offsetof(vertex, position));
 
 		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 2, GL_FLOAT, false, sizeof(vertex), (const void *)(intptr_t)offsetof(vertex, uv));
+		glVertexAttribPointer(1, 3, GL_FLOAT, false, sizeof(vertex), (const void *)(intptr_t)offsetof(vertex, normal));
+
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, false, sizeof(vertex), (const void *)(intptr_t)offsetof(vertex, uv));
 
 		glGenBuffers(1, &ibo);
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
@@ -317,17 +331,22 @@ int main(int argc, const char *argv[]) {
 	const char *vs_src = R"GLSL(#version 460 core
 
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aUV;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
 
 uniform mat4 sys_proj = mat4(1);
 uniform mat4 sys_view = mat4(1);
 uniform mat4 sys_model = mat4(1);
 
+out vec3 fPos;
+out vec3 fNormal;
 out vec2 fUV;
 out flat int fMaterial;
 
 void main(){
 	gl_Position = sys_proj * sys_view * sys_model * vec4(aPos, 1);
+	fPos = (sys_model * vec4(aPos, 1)).xyz;
+	fNormal = mat3(transpose(inverse(sys_model))) * aNormal;
 	fUV = aUV;
 	fMaterial = gl_DrawID;
 }
@@ -335,6 +354,8 @@ void main(){
 )GLSL";
 	const char *fs_src = R"GLSL(#version 460 core
 
+in vec3 fPos;
+in vec3 fNormal;
 in vec2 fUV;
 in flat int fMaterial;
 
@@ -351,15 +372,42 @@ layout(std430, binding = 0) buffer materials_buffer {
 
 out vec4 rColor;
 
+vec4 get_base_color(ivec4 tex, vec2 uv) {
+	if (tex.x == 0) {
+		return texture(sys_textures[0], vec3(uv, tex.y));
+	}
+	else if (tex.x == 1) {
+		return texture(sys_textures[1], vec3(uv, tex.y));
+	}
+	else if (tex.x == 2) {
+		return texture(sys_textures[2], vec3(uv, tex.y));
+	}
+	else {
+		return vec4(1, 0, 0, 1);
+	}
+}
+
 void main(){
 	material mat = materials[fMaterial];
 
-	vec4 col = texture(sys_textures[mat.base_color_texture.x], vec3(fUV, mat.base_color_texture.y));
+	vec3 light_color = vec3(1);
+	vec3 light_pos = vec3(0, 5, 0);
+	vec3 light_dir = normalize(light_pos - fPos);
 
-	rColor = mat.base_color;
-	rColor = vec4(fUV, 0, 1);
-	rColor = texture(sys_textures[0], vec3(fUV, 1));
-	rColor = col;
+	vec4 base_color = get_base_color(mat.base_color_texture, fUV);
+
+	// Ambient
+	float ambient_strength = 0.1;
+	vec3 ambient = light_color * ambient_strength;
+
+	// Diffuse
+	vec3 norm = normalize(fNormal);
+	float diffuse_strength = max(dot(norm, light_dir), 0.0);
+	vec3 diffuse = light_color * diffuse_strength;
+
+	rColor = vec4((ambient + diffuse) * base_color.rgb, base_color.a);
+	// rColor = base_color;
+	// rColor = vec4(vec3(dot(fNormal, light_dir)), 1);
 }
 
 )GLSL";
